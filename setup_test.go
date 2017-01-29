@@ -29,24 +29,26 @@ func checkPremailerToPlaintext(t *testing.T, expect, html string) {
 }
 
 // XXX: these are copied from the main pkg
-func eachElement(root *html.Node, callback func(parent, n *html.Node) bool) {
-	if root == nil {
-		return
-	}
-	for c := root; c != nil; c = c.NextSibling {
-		if !callback(root, c) {
+func eachElement(root *html.Node, callback func(n *html.Node) bool) {
+	var iter func(*html.Node)
+	iter = func(n *html.Node) {
+		if n == nil {
 			return
 		}
-		if c.FirstChild != nil {
-			eachElement(c.FirstChild, callback)
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			if !callback(c) {
+				return
+			}
+			iter(c)
 		}
 	}
-
+	iter(root)
+	callback(root)
 }
 
 func findElement(root *html.Node, element string) *html.Node {
 	var found *html.Node
-	eachElement(root, func(parent, n *html.Node) bool {
+	eachElement(root, func(n *html.Node) bool {
 		if n.Type == html.ElementNode && n.Data == element {
 			found = n
 			return false

@@ -122,7 +122,7 @@ func TestRemoveComments(t *testing.T) {
 		t.Error("Resulting content was not html", err)
 	}
 
-	eachElement(doc, func(_, n *html.Node) bool {
+	eachElement(doc, func(n *html.Node) bool {
 		if n.Type == html.CommentNode {
 			t.Error("Should have removed all comment nodes, found", n)
 		}
@@ -156,7 +156,7 @@ func TestDontRemoveComments(t *testing.T) {
 	}
 
 	var gotComment bool
-	eachElement(doc, func(_, n *html.Node) bool {
+	eachElement(doc, func(n *html.Node) bool {
 		if n.Type == html.CommentNode {
 			gotComment = true
 		}

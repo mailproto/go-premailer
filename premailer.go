@@ -14,31 +14,29 @@ type Premailer struct {
 	RemoveClasses        bool
 	RemoveComments       bool
 
-	doc       *html.Node
 	processed *html.Node
 	orig      []byte
 }
 
 // New parses an HTML fragment []byte and returns the result
 func New(body []byte) (*Premailer, error) {
-
-	doc, err := html.Parse(bytes.NewBuffer(body))
-	if err != nil {
-		return nil, err
-	}
-
 	return &Premailer{
 		LineLength: DefaultLineLength,
-		doc:        doc,
 		orig:       body,
 	}, nil
 }
 
-// ToPlainText converts the input document to the plaintext version
+// ToPlaintext converts the input document to the plaintext version
 func (p Premailer) ToPlaintext() (string, error) {
-	baseElement := findElement(p.doc, "body")
+	if p.processed == nil {
+		_, err := p.ToInlineCSS()
+		if err != nil {
+			return "", err
+		}
+	}
+	baseElement := findElement(p.processed, "body")
 	if baseElement == nil {
-		baseElement = p.doc
+		baseElement = p.processed
 	}
 
 	var buf bytes.Buffer

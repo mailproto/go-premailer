@@ -2,104 +2,28 @@ package premailer
 
 import (
 	"bytes"
-	"fmt"
-
 	"crypto/md5"
+	"fmt"
 
 	"golang.org/x/net/html"
 )
 
 func (p *Premailer) ToInlineCSS() (string, error) {
-	doc := p.doc
-	// def to_inline_css
-	//         doc = @processed_doc
-	//         @unmergable_rules = CssParser::Parser.new
 
-	//         # Give all styles already in style attributes a specificity of 1000
-	//         # per http://www.w3.org/TR/CSS21/cascade.html#specificity
-	//         doc.search("*[@style]").each do |el|
-	//           el['style'] = '[SPEC=1000[' + el.attributes['style'] + ']]'
-	//         end
-	//         # Iterate through the rules and merge them into the HTML
-	//         @css_parser.each_selector(:all) do |selector, declaration, specificity, media_types|
-	//           # Save un-mergable rules separately
-	//           selector.gsub!(/:link([\s]*)+/i) { |m| $1 }
-
-	//           # Convert element names to lower case
-	//           selector.gsub!(/([\s]|^)([\w]+)/) { |m| $1.to_s + $2.to_s.downcase }
-
-	//           if Premailer.is_media_query?(media_types) || selector =~ Premailer::RE_UNMERGABLE_SELECTORS
-	//             @unmergable_rules.add_rule_set!(CssParser::RuleSet.new(selector, declaration), media_types) unless @options[:preserve_styles]
-	//           else
-	//             begin
-	//               if selector =~ Premailer::RE_RESET_SELECTORS
-	//                 # this is in place to preserve the MailChimp CSS reset: http://github.com/mailchimp/Email-Blueprints/
-	//                 # however, this doesn't mean for testing pur
-	//                 @unmergable_rules.add_rule_set!(CssParser::RuleSet.new(selector, declaration)) unless !@options[:preserve_reset]
-	//               end
-
-	//               # Change single ID CSS selectors into xpath so that we can match more
-	//               # than one element.  Added to work around dodgy generated code.
-	//               selector.gsub!(/\A\#([\w_\-]+)\Z/, '*[@id=\1]')
-
-	//               doc.search(selector).each do |el|
-	//                 if el.elem? and (el.name != 'head' and el.parent.name != 'head')
-	//                   # Add a style attribute or append to the existing one
-	//                   block = "[SPEC=#{specificity}[#{declaration}]]"
-	//                   el['style'] = (el.attributes['style'].to_s ||= '') + ' ' + block
-	//                 end
-	//               end
-	//             rescue ::Nokogiri::SyntaxError, RuntimeError, ArgumentError
-	//               $stderr.puts "CSS syntax error with selector: #{selector}" if @options[:verbose]
-	//               next
-	//             end
-	//           end
-	//         end
-
-	if p.RemoveScripts {
-		removeAllElement(doc, "script")
+	inlined, err := Douceur(string(p.orig))
+	if err != nil {
+		return "", err
 	}
 
-	//         # Read STYLE attributes and perform folding
-	//         doc.search("*[@style]").each do |el|
-	//           style = el.attributes['style'].to_s
-
-	//           declarations = []
-	//           style.scan(/\[SPEC\=([\d]+)\[(.[^\]\]]*)\]\]/).each do |declaration|
-	//             rs = CssParser::RuleSet.new(nil, declaration[1].to_s, declaration[0].to_i)
-	//             declarations << rs
-	//           end
-
-	//           # Perform style folding
-	//           merged = CssParser.merge(declarations)
-	//           merged.expand_shorthand!
-
-	//           # Duplicate CSS attributes as HTML attributes
-	//           if Premailer::RELATED_ATTRIBUTES.has_key?(el.name) && @options[:css_to_attributes]
-	//             Premailer::RELATED_ATTRIBUTES[el.name].each do |css_att, html_att|
-	//               el[html_att] = merged[css_att].gsub(/url\(['|"](.*)['|"]\)/, '\1').gsub(/;$|\s*!important/, '').strip if el[html_att].nil? and not merged[css_att].empty?
-	//               merged.instance_variable_get("@declarations").tap do |declarations|
-	//                 declarations.delete(css_att)
-	//               end
-	//             end
-	//           end
-	//           # Collapse multiple rules into one as much as possible.
-	//           merged.create_shorthand! if @options[:create_shorthands]
-
-	//           # write the inline STYLE attribute
-	//           # split by ';' but ignore those in brackets
-	//           attributes = Premailer.escape_string(merged.declarations_to_s).split(/;(?![^(]*\))/).map(&:strip)
-	//           attributes = attributes.map { |attr| [attr.split(':').first, attr] }.sort_by { |pair| pair.first }.map { |pair| pair[1] }
-	//           el['style'] = attributes.join('; ') + ";"
-	//         end
-
-	//         doc = write_unmergable_css_rules(doc, @unmergable_rules)
+	if p.RemoveScripts {
+		removeAllElement(inlined, "script")
+	}
 
 	if p.RemoveClasses || p.RemoveComments {
-		eachElement(doc, func(parent, n *html.Node) bool {
+		eachElement(inlined, func(n *html.Node) bool {
 			if p.RemoveComments && n.Type == html.CommentNode {
-				if parent != nil {
-					parent.RemoveChild(n)
+				if n.Parent != nil {
+					n.Parent.RemoveChild(n)
 				}
 			} else if p.RemoveClasses && n.Type == html.ElementNode {
 				var attrs []html.Attribute
@@ -113,23 +37,13 @@ func (p *Premailer) ToInlineCSS() (string, error) {
 			}
 			return true
 		})
-
 	}
-	//         if @options[:remove_classes] or @options[:remove_comments]
-	//           doc.traverse do |el|
-	//             if el.comment? and @options[:remove_comments]
-	//               el.remove
-	//             elsif el.element?
-	//               el.remove_attribute('class') if @options[:remove_classes]
-	//             end
-	//           end
-	//         end
 
 	if p.RemoveIDs {
 		targets := make(map[string]struct{})
 
 		// find all anchor's targets and hash them
-		eachElement(doc, func(_, n *html.Node) bool {
+		eachElement(inlined, func(n *html.Node) bool {
 			if n.Type == html.ElementNode && n.Data == "a" {
 				var attrs []html.Attribute
 				for _, attr := range n.Attr {
@@ -145,7 +59,7 @@ func (p *Premailer) ToInlineCSS() (string, error) {
 		})
 
 		// hash ids that are links target, delete others
-		eachElement(doc, func(_, n *html.Node) bool {
+		eachElement(inlined, func(n *html.Node) bool {
 			var attrs []html.Attribute
 			for _, attr := range n.Attr {
 				if attr.Key == "id" {
@@ -163,7 +77,7 @@ func (p *Premailer) ToInlineCSS() (string, error) {
 	}
 
 	if p.ResetContentEditable {
-		eachElement(doc, func(_, n *html.Node) bool {
+		eachElement(inlined, func(n *html.Node) bool {
 			removeAttribute(n, "contenteditable")
 			return true
 		})
@@ -178,8 +92,10 @@ func (p *Premailer) ToInlineCSS() (string, error) {
 	//         end
 	//       end
 
+	p.processed = inlined
+
 	var buf bytes.Buffer
-	err := html.Render(&buf, doc)
+	err = html.Render(&buf, p.processed)
 	if err != nil {
 		return "", err
 	}
