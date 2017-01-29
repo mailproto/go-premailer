@@ -13,44 +13,37 @@ func checkPlaintext(t *testing.T, expect, html string) {
 	}
 }
 
+func checkPremailer(t *testing.T, expect, html string) {
+	p, err := premailer.New([]byte(html))
+	if err != nil {
+		t.Errorf("Error creating premailer from `%v`: %v", html, err)
+	}
+
+	if plain, err := p.ToPlainText(); err != nil {
+		t.Errorf("Error generating plaintext from `%v`: %v", html, err)
+	} else if plain != expect {
+		t.Errorf("Wrong content from `%v`, want: `%v` got: `%v`", html, expect, plain)
+	}
+}
+
 func TestToPlaintextWithFragment(t *testing.T) {
-	t.Skip("Requires full premailer pass")
-	//     def test_to_plain_text_with_fragment
-	//     premailer = Premailer.new('<p>Test</p>', :with_html_string => true)
-	//     assert_match /Test/, premailer.to_plain_text
-	// end
+	checkPremailer(t, `Test`, `<p>Test</p>`)
 }
 
 func TestToPlaintextWithBody(t *testing.T) {
-	t.Skip("Requires full premailer pass")
-	// def test_to_plain_text_with_body
-	//     html = <<END_HTML
-	//     <html>
-	//     <title>Ignore me</title>
-	//     <body>
-	// 		<p>Test</p>
-	// 		</body>
-	// 		</html>
-	// END_HTML
-
-	//     premailer = Premailer.new(html, :with_html_string => true)
-	//     assert_match /Test/, premailer.to_plain_text
-	// end
+	checkPremailer(t, `Test`, `<html>
+	    <title>Ignore me</title>
+	    <body>
+			<p>Test</p>
+			</body>
+			</html>`)
 }
 
 func TestToPlaintextWithMalformedBody(t *testing.T) {
-	t.Skip("Requires full premailer pass")
-	//   def test_to_plain_text_with_malformed_body
-	//     html = <<END_HTML
-	//     <html>
-	//     <title>Ignore me</title>
-	//     <body>
-	// 		<p>Test
-	// END_HTML
-
-	//     premailer = Premailer.new(html, :with_html_string => true)
-	//     assert_match /Test/, premailer.to_plain_text
-	//   end
+	checkPremailer(t, `Test`, `<html>
+    <title>Ignore me</title>
+    <body>
+		<p>Test`)
 }
 
 func TestSpecialChars(t *testing.T) {
@@ -66,17 +59,11 @@ func TestStrippingWhitespace(t *testing.T) {
 }
 
 func TestWrappingSpans(t *testing.T) {
-	t.Skip("Requires full premailer pass")
-	//        html = <<END_HTML
-	//     <html>
-	//     <body>
-	// 		<p><span>Test</span>
-	// 		<span>line 2</span>
-	// 		</p>
-	// END_HTML
-
-	//     premailer = Premailer.new(html, :with_html_string => true)
-	// assert_match /Test line 2/, premailer.to_plain_text
+	checkPremailer(t, `Test line 2`, `<html>
+	    <body>
+			<p><span>Test</span>
+			<span>line 2</span>
+			</p>`)
 }
 
 func TestLineBreaks(t *testing.T) {
@@ -94,17 +81,11 @@ func TestStrippingHTML(t *testing.T) {
 }
 
 func TestStrippingIgnoredBlocks(t *testing.T) {
-	t.Skip("Requires full premailer pass")
-	//        html = <<END_HTML
-	//     <html>
-	//     <body>
-	// 		<p><span>Test</span>
-	// 		<span>line 2</span>
-	// 		</p>
-	// END_HTML
-
-	//     premailer = Premailer.new(html, :with_html_string => true)
-	// assert_match /Test line 2/, premailer.to_plain_text
+	checkPremailer(t, "test\n\ntext", `<p>test</p>
+    <!-- start text/html -->
+      <img src="logo.png" alt="logo">
+    <!-- end text/html -->
+    <p>text</p>`)
 }
 
 func TestParagraphsAndBreaks(t *testing.T) {
@@ -226,8 +207,3 @@ func TestMultipleLinksPerLine(t *testing.T) {
 func TestLinksWithinHeadings(t *testing.T) {
 	checkPlaintext(t, "****************************\nTest ( http://example.com/ )\n****************************", "<h1><a href='http://example.com/'>Test</a></h1>")
 }
-
-//   def assert_plaintext(out, raw, msg = nil, line_length = 65)
-//     assert_equal out, convert_to_text(raw, line_length), msg
-//   end
-// end
