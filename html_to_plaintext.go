@@ -35,7 +35,6 @@ var (
 // Defaults
 const (
 	DefaultLineLength = 65
-	DefaultCharset    = "UTF-8"
 )
 
 // XXX: based on premailer/premailer@7c94e7a5a457b6710bada8186c6a41fccbfa08d1
@@ -51,7 +50,8 @@ func submatchReplace(text string, regex *regexp.Regexp, replace func(string, []i
 }
 
 // ConvertToText returns the text in UTF-8 format with all HTML tags removed
-func ConvertToText(doc string, lineLength int, fromCharset string) string {
+// XXX: doc []byte?
+func ConvertToText(doc string, lineLength int) string {
 
 	//  strip text ignored html. Useful for removing
 	//  headers and footers that aren't needed in the
