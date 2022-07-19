@@ -3,6 +3,7 @@ package premailer
 import (
 	"bytes"
 
+	"github.com/mailproto/textplain"
 	"golang.org/x/net/html"
 )
 
@@ -21,8 +22,7 @@ type Premailer struct {
 // New parses an HTML fragment []byte and returns the result
 func New(body []byte) (*Premailer, error) {
 	return &Premailer{
-		LineLength: DefaultLineLength,
-		orig:       body,
+		orig: body,
 	}, nil
 }
 
@@ -45,5 +45,7 @@ func (p Premailer) ToPlaintext() (string, error) {
 		return "", err
 	}
 
-	return ConvertToText(string(buf.Bytes()), p.LineLength), nil
+	// XXX: add support for passing the html blob to textplain
+	// and configuring line length
+	return textplain.Convert(buf.String(), textplain.DefaultLineLength)
 }

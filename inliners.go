@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"strings"
 
-	"github.com/aymerick/douceur/inliner"
+	douceur "github.com/aymerick/douceur/inliner"
 	"golang.org/x/net/html"
 )
 
+type Inliner func(string) (string, error)
+
 func Douceur(raw string) (*html.Node, error) {
-	inlined, err := inliner.Inline(raw)
+	inlined, err := douceur.Inline(raw)
 	if err != nil {
 		return nil, err
 	}

@@ -4,6 +4,7 @@ go 1.18
 
 require (
 	github.com/aymerick/douceur v0.2.0
+	github.com/mailproto/textplain v0.0.0-20171113154759-496feff390b3
 	golang.org/x/net v0.0.0-20220708220712-1185a9018129
 )
 
