@@ -22,7 +22,8 @@ type Premailer struct {
 // New parses an HTML fragment []byte and returns the result
 func New(body []byte) (*Premailer, error) {
 	return &Premailer{
-		orig: body,
+		orig:       body,
+		LineLength: textplain.DefaultLineLength,
 	}, nil
 }
 
@@ -46,6 +47,5 @@ func (p Premailer) ToPlaintext() (string, error) {
 	}
 
 	// XXX: add support for passing the html blob to textplain
-	// and configuring line length
-	return textplain.Convert(buf.String(), textplain.DefaultLineLength)
+	return textplain.Convert(buf.String(), p.LineLength)
 }
