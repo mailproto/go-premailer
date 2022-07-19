@@ -1,19 +1,12 @@
 package premailer_test
 
 import (
-	"strings"
 	"testing"
 
 	"golang.org/x/net/html"
 
 	premailer "github.com/mailproto/go-premailer"
 )
-
-func checkConvertToText(t *testing.T, expect, html string) {
-	if plain := premailer.ConvertToText(html, premailer.DefaultLineLength); strings.TrimSpace(plain) != expect {
-		t.Errorf("Wrong conversion of `%v`, want: %v got: %v", html, expect, plain)
-	}
-}
 
 func checkPremailerToPlaintext(t *testing.T, expect, html string) {
 	p, err := premailer.New([]byte(html))
