@@ -1,4 +1,4 @@
-module github.com/mailproto/go-premailer
+module github.com/mailproto/go-juicer
 
 go 1.26.0
 

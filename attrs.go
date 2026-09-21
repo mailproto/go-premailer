@@ -1,4 +1,4 @@
-package premailer
+package juicer
 
 import (
 	"crypto/md5"

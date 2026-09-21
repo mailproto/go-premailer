@@ -1,4 +1,4 @@
-package premailer
+package juicer
 
 // Differential test against juice, the reference implementation.
 //

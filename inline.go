@@ -1,11 +1,11 @@
-// Package premailer inlines CSS into HTML email, matching the behaviour of
+// Package juicer inlines CSS into HTML email, matching the behaviour of
 // the JavaScript library juice (https://github.com/Automattic/juice) v12.
 //
 // Output is intended to be byte-identical to juice's, which is why the HTML
 // parser and serializer in parse.go deliberately do not follow the HTML5 tree
 // construction spec: juice parses with htmlparser2, and matching a mail
 // client's view of the message means matching that.
-package premailer
+package juicer
 
 import (
 	"bytes"

@@ -1,10 +1,10 @@
-# go-premailer
+# go-juicer
 
 A Go CSS inliner for HTML email, matching the behaviour of
 [juice](https://github.com/Automattic/juice) v12.
 
 ```go
-out, err := premailer.Inline(`<style>p{color:red}</style><p>hi</p>`)
+out, err := juicer.Inline(`<style>p{color:red}</style><p>hi</p>`)
 // <p style="color: red;">hi</p>
 ```
 
