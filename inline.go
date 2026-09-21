@@ -256,16 +256,14 @@ func (in *pass) collectCSS(root *html.Node) ([]rule, []preserved) {
 // delete-and-reinsert does.
 func (in *pass) applyRules(root *html.Node, rules []rule) {
 	o := in.o
+	rs := newRuleSet(rules)
+	var sc scratch
 	walk(root, func(n *html.Node) {
 		if n.Type != html.ElementNode || nonVisualElements[n.Data] {
 			return
 		}
 		var m *propMap
-		for i := range rules {
-			r := &rules[i]
-			if r.match == nil || !r.match.Match(n) {
-				continue
-			}
+		rs.forEach(n, &sc, func(i int, r *rule) {
 			if m == nil {
 				m = &propMap{}
 				// The existing style attribute seeds the map on first match.
@@ -279,7 +277,7 @@ func (in *pass) applyRules(root *html.Node, rules []rule) {
 				// Declarations for ::before/::after belong to a detached
 				// element; without materialization they are simply dropped,
 				// but they must not leak onto the base element.
-				continue
+				return
 			}
 			for _, d := range r.decls {
 				prio := 0
@@ -294,7 +292,7 @@ func (in *pass) applyRules(root *html.Node, rules []rule) {
 					rule:  int32(i),
 				})
 			}
-		}
+		})
 		if m == nil {
 			return
 		}

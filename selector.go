@@ -286,17 +286,45 @@ func isIdent(b []byte) bool {
 
 // rightmostKey picks the index bucket for a selector: the id, else a class,
 // else the tag of its rightmost compound.
+//
+// Only simple selectors written directly in that compound count. A class
+// inside a functional pseudo-class argument does not: p:not(.x) matches any p,
+// so bucketing it under class "x" would silently lose every other match.
 func rightmostKey(sel string) (keyKind, string) {
 	last := rightmostCompound(sel)
-	if i := strings.IndexByte(last, '#'); i >= 0 {
-		if n := identEndStr(last, i+1); n > i+1 {
-			return keyID, last[i+1 : n]
+	var class string
+	for i := 0; i < len(last); {
+		switch c := last[i]; {
+		case c == '#':
+			if n := identEndStr(last, i+1); n > i+1 {
+				return keyID, last[i+1 : n]
+			}
+			i++
+		case c == '.':
+			n := identEndStr(last, i+1)
+			if n > i+1 && class == "" {
+				class = last[i+1 : n]
+			}
+			i = max(n, i+1)
+		case c == '[':
+			i = attrEnd([]byte(last), i)
+		case c == ':':
+			// Skip the pseudo name and any argument list wholesale.
+			j := i + 1
+			if j < len(last) && last[j] == ':' {
+				j++
+			}
+			j = identEndStr(last, j)
+			if j < len(last) && last[j] == '(' {
+				j = parenEnd([]byte(last), j)
+			}
+			i = max(j, i+1)
+		default:
+			i++
 		}
 	}
-	if i := strings.IndexByte(last, '.'); i >= 0 {
-		if n := identEndStr(last, i+1); n > i+1 {
-			return keyClass, last[i+1 : n]
-		}
+	if class != "" {
+		return keyClass, class
 	}
 	if n := identEndStr(last, 0); n > 0 && isSelectorNameStart(last[0]) {
 		return keyTag, strings.ToLower(last[:n])
