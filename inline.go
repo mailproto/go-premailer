@@ -176,6 +176,7 @@ type resolvedEl struct {
 type pass struct {
 	o        *options
 	resolved []resolvedEl
+	byNode   map[*html.Node]*propMap // ancestor lookup for var() resolution
 }
 
 // process runs the inlining pipeline over an already-parsed tree.
@@ -195,6 +196,10 @@ func (in *pass) run(root *html.Node) error {
 	}
 
 	in.applyRules(root, rules)
+	if o.resolveCSSVariables {
+		in.resolveVariables()
+	}
+	in.writeStyles()
 	in.promoteAttributes(root)
 	in.emitPreserved(root, keep)
 	in.cleanup(root)
@@ -296,11 +301,23 @@ func (in *pass) applyRules(root *html.Node, rules []rule) {
 		if m == nil {
 			return
 		}
-		if v := m.styleAttr(o); v != nil {
-			setAttr(n, o.styleAttributeName, string(v))
-		}
 		in.resolved = append(in.resolved, resolvedEl{n, m})
+		if in.byNode == nil {
+			in.byNode = make(map[*html.Node]*propMap)
+		}
+		in.byNode[n] = m
 	})
+}
+
+// writeStyles serializes each element's resolved declarations. It runs after
+// accumulation because attribute promotion reads the same property map, and
+// after variable resolution so the promoted values are the substituted ones.
+func (in *pass) writeStyles() {
+	for _, el := range in.resolved {
+		if v := el.props.styleAttr(in.o); v != nil {
+			setAttr(el.node, in.o.styleAttributeName, string(v))
+		}
+	}
 }
 
 func preservedText(keep []preserved) []byte {

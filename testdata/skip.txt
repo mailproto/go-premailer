@@ -6,8 +6,4 @@
 #
 # An ALLOW entry is a divergence we have decided to keep. Those are described
 # in the README and should stay rare.
-
 inline-seed/quotes  ALLOW: juice throws a CssSyntaxError on style="font-family:&quot;A B&quot;" because it feeds the undecoded attribute to postcss. Crashing on ordinary email is not worth matching.
-l4-spec/is  unimplemented: :is() desugaring
-l4-spec/where  unimplemented: :where() desugaring
-variables/basic  unimplemented: var() resolution

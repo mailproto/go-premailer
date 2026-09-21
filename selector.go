@@ -24,7 +24,6 @@ type rule struct {
 	match   cascadia.Matcher
 	spec    [3]int // ids, classes+attrs, types+pseudos
 	pseudo  uint8
-	ignored bool // carries :hover and friends, so it is preserved not inlined
 	order   uint32
 	key     keyKind
 	keyName string
@@ -89,24 +88,102 @@ func splitSelector(sel []byte) [][]byte {
 	return out
 }
 
-// compileRule turns one comma-arm into a rule. It reports false when the arm
-// cannot be matched at all, which juice also treats as a silent skip.
-func compileRule(arm []byte, decls []decl) (rule, bool) {
-	r := rule{sel: string(arm), decls: decls}
+// maxExpansion caps the cartesian blow-up from nested :is() lists.
+const maxExpansion = 32
 
-	text, spec, pseudo, ignored := scanSelector(arm)
-	r.spec, r.pseudo, r.ignored = spec, pseudo, ignored
-	if ignored {
-		return r, true
+// compileRule turns one comma-arm into rules. :is() and :where() are
+// desugared into one rule per alternative, all carrying the specificity of
+// the original arm, which is exactly how Selectors L4 scores them: the list
+// contributes the maximum of its arguments, not the alternative that matched.
+//
+// It returns ignored=true for an arm juice preserves rather than inlines, and
+// no rules at all for one neither engine can match.
+func compileRule(arm []byte, decls []decl) (rules []rule, ignored bool) {
+	_, spec, pseudo, ign := scanSelector(arm)
+	if ign {
+		return nil, true
 	}
 
-	m, err := cascadia.Parse(text)
-	if err != nil {
-		return r, false
+	for _, variant := range expandFunctional(arm) {
+		text, _, _, vIgn := scanSelector(variant)
+		if vIgn {
+			continue
+		}
+		m, err := cascadia.Parse(text)
+		if err != nil {
+			// juice swallows selectors its engine cannot parse.
+			continue
+		}
+		r := rule{sel: string(arm), decls: decls, spec: spec, pseudo: pseudo, match: m}
+		r.key, r.keyName = rightmostKey(text)
+		rules = append(rules, r)
 	}
-	r.match = m
-	r.key, r.keyName = rightmostKey(text)
-	return r, true
+	return rules, false
+}
+
+// expandFunctional rewrites :is()/:where() selector lists into the equivalent
+// set of plain selectors. cascadia cannot parse either, and expanding is
+// exact here because the specificity comes from the original arm.
+func expandFunctional(arm []byte) [][]byte {
+	out := [][]byte{arm}
+	for {
+		grew := false
+		var next [][]byte
+		for _, cand := range out {
+			at, end, ok := findSelectorList(cand)
+			if !ok {
+				next = append(next, cand)
+				continue
+			}
+			open := bytes.IndexByte(cand[at:end], '(') + at
+			if open <= at || end < open+2 || cand[end-1] != ')' {
+				next = append(next, cand)
+				continue
+			}
+			grew = true
+			for _, alt := range splitSelector(cand[open+1 : end-1]) {
+				if len(next) >= maxExpansion {
+					break
+				}
+				v := make([]byte, 0, len(cand)+len(alt))
+				v = append(v, cand[:at]...)
+				v = append(v, alt...)
+				v = append(v, cand[end:]...)
+				next = append(next, v)
+			}
+		}
+		out = next
+		if !grew || len(out) >= maxExpansion {
+			return out
+		}
+	}
+}
+
+// findSelectorList locates the first top-level :is()/:where()/:matches().
+func findSelectorList(sel []byte) (start, end int, ok bool) {
+	for i := 0; i < len(sel); i++ {
+		switch sel[i] {
+		case '[':
+			i = attrEnd(sel, i) - 1
+		case ':':
+			j := i + 1
+			if j < len(sel) && sel[j] == ':' {
+				j++
+			}
+			ne := identEnd(sel, j)
+			name := strings.ToLower(string(sel[j:ne]))
+			if ne < len(sel) && sel[ne] == '(' {
+				e := parenEnd(sel, ne)
+				if name == "is" || name == "where" || name == "matches" {
+					return i, e, true
+				}
+				i = e - 1
+				continue
+			}
+			i = ne - 1
+		}
+	}
+	return 0, 0, false
 }
 
 // scanSelector walks a single comma-arm, returning the text to hand cascadia
@@ -165,13 +242,11 @@ func scanSelector(arm []byte) (text string, spec [3]int, pseudo uint8, ignored b
 				}
 				spec[2]++
 			case name == "where":
-				// Contributes nothing and matches anything its argument does;
-				// dropping it changes matching, so it is unsupported for now.
-				return "", spec, pseudoNone, true
-			case name == "is" || name == "matches":
-				return "", spec, pseudoNone, true
-			case name == "not" || name == "has":
-				// cascadia already scores these as max-of-arguments.
+				// Selectors L4: :where() contributes zero specificity. The
+				// text is irrelevant because expandFunctional rewrites it.
+			case name == "is" || name == "matches" || name == "not" || name == "has":
+				// Selectors L4: these take the maximum specificity of
+				// their arguments.
 				s := argSpecificity(arg)
 				spec[0] += s[0]
 				spec[1] += s[1]
@@ -226,7 +301,8 @@ func rewriteHas(seg []byte, name string) []byte {
 		return seg
 	}
 	open := bytes.IndexByte(seg, '(')
-	if open < 0 {
+	// As above: an unclosed parenthesis leaves no usable span.
+	if open < 0 || len(seg) < 2 || seg[len(seg)-1] != ')' || open+1 > len(seg)-1 {
 		return seg
 	}
 	inner := bytes.TrimSpace(seg[open+1 : len(seg)-1])
@@ -239,8 +315,13 @@ func rewriteHas(seg []byte, name string) []byte {
 // quoteAttrValue quotes a bare attribute value cascadia would reject.
 // Browsers and postcss accept [width=600]; cascadia requires an identifier.
 func quoteAttrValue(seg []byte) []byte {
+	// attrEnd yields the rest of the input when the bracket is never closed;
+	// there is nothing to rewrite in that case.
+	if len(seg) < 2 || seg[len(seg)-1] != ']' {
+		return seg
+	}
 	eq := bytes.IndexByte(seg, '=')
-	if eq < 0 {
+	if eq < 0 || eq+1 > len(seg)-1 {
 		return seg
 	}
 	val := seg[eq+1 : len(seg)-1]

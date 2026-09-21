@@ -123,17 +123,17 @@ func parseStylesheet(src []byte, opts *options, ord uint32) ([]rule, []preserved
 
 		case css.DeclarationGrammar:
 			if len(stack) > 0 {
-				v, imp := declValue(src[start:end])
+				name, v, imp := declParts(src[start:end])
 				if len(v) > 0 {
 					if imp {
 						v = append(append([]byte{}, v...), importantText(src[start:end])...)
 					}
 					b := stack[len(stack)-1]
-					b.decls = append(b.decls, decl{prop: string(data), value: v})
+					b.decls = append(b.decls, decl{prop: name, value: v})
 				}
 				continue
 			}
-			v, imp := declValue(src[start:end])
+			name, v, imp := declParts(src[start:end])
 			if len(v) == 0 {
 				// juice drops empty values, preserving mensch behaviour.
 				continue
@@ -143,15 +143,15 @@ func parseStylesheet(src []byte, opts *options, ord uint32) ([]rule, []preserved
 			} else if imp {
 				v = append(append([]byte{}, v...), " !important"...)
 			}
-			decls = append(decls, decl{prop: string(data), value: v, important: imp, ord: ord})
+			decls = append(decls, decl{prop: name, value: v, important: imp, ord: ord})
 			ord++
 
 		case css.CustomPropertyGrammar:
 			if len(stack) > 0 {
 				continue
 			}
-			v, imp := declValue(src[start:end])
-			decls = append(decls, decl{prop: string(data), value: v, important: imp, ord: ord})
+			name, v, imp := declParts(src[start:end])
+			decls = append(decls, decl{prop: name, value: v, important: imp, ord: ord})
 			ord++
 
 		case css.EndRulesetGrammar:
@@ -170,16 +170,12 @@ func parseStylesheet(src []byte, opts *options, ord uint32) ([]rule, []preserved
 			shared := append([]decl(nil), decls...)
 			anyIgnored := false
 			for _, arm := range splitSelector(sel) {
-				r, ok := compileRule(arm, shared)
-				if !ok {
-					// juice swallows selectors its engine cannot parse.
-					continue
-				}
-				if r.ignored {
+				armRules, ignored := compileRule(arm, shared)
+				if ignored {
 					anyIgnored = true
 					continue
 				}
-				rules = append(rules, r)
+				rules = append(rules, armRules...)
 			}
 			// juice preserves the rule as written, selector list and all, so
 			// a:hover keeps its :hover arm in <style> while the plain arm is
@@ -278,6 +274,19 @@ func selectorText(src []byte, start, end int) []byte {
 		s = s[:i]
 	}
 	return trimCSS(s)
+}
+
+// declParts splits a declaration span into its property name and value. The
+// name is sliced from the source rather than taken from the parser, which
+// lowercases it; juice keys styleProps by the name as written, so a stylesheet
+// declaring "A: red" emits "A: red".
+func declParts(span []byte) (name string, value []byte, important bool) {
+	i := bytes.IndexByte(span, ':')
+	if i < 0 {
+		return "", nil, false
+	}
+	v, imp := declValue(span)
+	return string(trimCSS(span[:i])), v, imp
 }
 
 // declValue pulls the value out of a declaration span, which may carry a
