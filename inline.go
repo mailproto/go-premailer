@@ -7,6 +7,13 @@
 // client's view of the message means matching that.
 package premailer
 
+import (
+	"bytes"
+	"strings"
+
+	"golang.org/x/net/html"
+)
+
 // Inliner holds resolved options and is safe for concurrent use. Reuse one
 // across documents rather than constructing per call.
 type Inliner struct {
@@ -156,8 +163,172 @@ func Inline(doc string, opts ...Option) (string, error) {
 	return New(opts...).Inline(doc)
 }
 
+// resolvedEl pairs an element with the declarations resolved for it. The
+// property map has to outlive writing the style attribute, because attribute
+// promotion reads resolved values rather than reparsing the attribute.
+type resolvedEl struct {
+	node  *html.Node
+	props *propMap
+}
+
+// pass holds the state for inlining one document. Inliner itself stays
+// immutable so it can be shared across goroutines.
+type pass struct {
+	o        *options
+	resolved []resolvedEl
+}
+
 // process runs the inlining pipeline over an already-parsed tree.
-func (in *Inliner) process(root *node) error {
+func (in *Inliner) process(root *html.Node) error {
+	p := &pass{o: &in.opts}
+	return p.run(root)
+}
+
+func (in *pass) run(root *html.Node) error {
+	o := in.o
+
+	rules, keep := in.collectCSS(root)
+	if extra := strings.TrimSpace(o.extraCSS); extra != "" {
+		r, k, _ := parseStylesheet([]byte(extra), o, uint32(len(rules))<<8)
+		rules = append(rules, r...)
+		keep = append(keep, k...)
+	}
+
+	in.applyRules(root, rules)
+	in.promoteAttributes(root)
+	in.emitPreserved(root, keep)
 	in.cleanup(root)
 	return nil
+}
+
+// collectCSS gathers CSS from <style> elements and disposes of them. Each tag
+// is handled on its own, because juice computes the text to preserve per tag
+// and replaces that tag's contents with it.
+func (in *pass) collectCSS(root *html.Node) ([]rule, []preserved) {
+	o := in.o
+	var rules []rule
+	var keep []preserved
+	var ord uint32
+
+	var styles []*html.Node
+	walk(root, func(n *html.Node) {
+		if n.Type == html.ElementNode && n.Data == "style" {
+			styles = append(styles, n)
+		}
+	})
+
+	for _, s := range styles {
+		// juice ignores a <style> that is not exactly one text node.
+		if s.FirstChild == nil || s.FirstChild != s.LastChild || s.FirstChild.Type != html.TextNode {
+			if o.removeStyleTags {
+				detach(s)
+			}
+			continue
+		}
+		if _, embedded := getAttr(s, "data-embed"); embedded {
+			removeAttr(s, "data-embed")
+			continue
+		}
+
+		var r []rule
+		var k []preserved
+		if o.applyStyleTags {
+			r, k, ord = parseStylesheet([]byte(s.FirstChild.Data), o, ord)
+			rules = append(rules, r...)
+		}
+
+		if !o.removeStyleTags {
+			continue
+		}
+		if len(k) == 0 {
+			detach(s)
+			continue
+		}
+		// Rules that could not be inlined stay behind in this tag.
+		s.FirstChild.Data = string(preservedText(k))
+	}
+	return rules, keep
+}
+
+// applyRules walks the document once in order, applying every matching rule to
+// each element. Rules are tested in stylesheet order so that the
+// different-selector override moves a property to the end exactly as juice's
+// delete-and-reinsert does.
+func (in *pass) applyRules(root *html.Node, rules []rule) {
+	o := in.o
+	walk(root, func(n *html.Node) {
+		if n.Type != html.ElementNode || nonVisualElements[n.Data] {
+			return
+		}
+		var m *propMap
+		for i := range rules {
+			r := &rules[i]
+			if r.match == nil || !r.match.Match(n) {
+				continue
+			}
+			if m == nil {
+				m = &propMap{}
+				// The existing style attribute seeds the map on first match.
+				// An element no rule touches is never visited, so its style
+				// attribute is left exactly as written.
+				if v, ok := getAttr(n, o.styleAttributeName); ok {
+					m.seedInline([]byte(v), o)
+				}
+			}
+			if r.pseudo != pseudoNone {
+				// Declarations for ::before/::after belong to a detached
+				// element; without materialization they are simply dropped,
+				// but they must not leak onto the base element.
+				continue
+			}
+			for _, d := range r.decls {
+				prio := 0
+				if d.important {
+					prio = 2
+				}
+				m.add(property{
+					prop:  d.prop,
+					value: d.value,
+					key:   packKey(prio, r.spec[0], r.spec[1], r.spec[2]),
+					ord:   d.ord,
+					rule:  int32(i),
+				})
+			}
+		}
+		if m == nil {
+			return
+		}
+		if v := m.styleAttr(o); v != nil {
+			setAttr(n, o.styleAttributeName, string(v))
+		}
+		in.resolved = append(in.resolved, resolvedEl{n, m})
+	})
+}
+
+func preservedText(keep []preserved) []byte {
+	var b bytes.Buffer
+	b.WriteByte('\n')
+	for _, k := range keep {
+		b.Write(k.text)
+		b.WriteByte('\n')
+	}
+	return b.Bytes()
+}
+
+// emitPreserved appends a <style> holding rules that could not be inlined,
+// when no surviving <style> already carries them.
+func (in *pass) emitPreserved(root *html.Node, keep []preserved) {
+	if len(keep) == 0 {
+		return
+	}
+	host := findFirst(root, "head")
+	if host == nil {
+		host = findFirst(root, "body")
+	}
+	if host == nil {
+		host = root
+	}
+	s := &html.Node{Type: html.ElementNode, Data: "style"}
+	s.AppendChild(&html.Node{Type: html.TextNode, Data: string(preservedText(keep))})
+	host.AppendChild(s)
 }

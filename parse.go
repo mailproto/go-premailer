@@ -2,6 +2,7 @@ package premailer
 
 import (
 	"bytes"
+	"strings"
 
 	"golang.org/x/net/html"
 )
@@ -11,85 +12,22 @@ import (
 //
 // This deliberately skips HTML5 tree construction: no implied <tbody>, no
 // <html>/<head>/<body> synthesis, no foster parenting, no reconstruction of
-// active formatting elements. Text and attribute values are kept as raw,
-// undecoded bytes so the serializer can write them back byte for byte --
-// x/net/html's Parse+Render would turn &nbsp; into U+00A0 and re-escape & in
-// URLs, both of which a mail client can see.
-
-type nodeType uint8
-
-const (
-	nodeElement nodeType = iota
-	nodeText
-	nodeComment
-	nodeDoctype
-)
-
-type attribute struct {
-	name  string
-	value []byte // raw and undecoded; empty serializes as a bare attribute
-}
-
-type node struct {
-	typ    nodeType
-	tag    string // lowercased
-	attrs  []attribute
-	raw    []byte // text, comment and doctype content, including delimiters
-	parent *node
-	kids   []*node
-	// foreign marks svg/math and their descendants. dom-serializer closes any
-	// childless element in foreign content, so <g></g> renders as <g/>.
-	foreign bool
-}
-
-func (n *node) add(c *node) {
-	c.parent = n
-	n.kids = append(n.kids, c)
-}
-
-func (n *node) attr(name string) ([]byte, bool) {
-	for i := range n.attrs {
-		if n.attrs[i].name == name {
-			return n.attrs[i].value, true
-		}
-	}
-	return nil, false
-}
-
-func (n *node) setAttr(name string, v []byte) {
-	for i := range n.attrs {
-		if n.attrs[i].name == name {
-			n.attrs[i].value = v
-			return
-		}
-	}
-	n.attrs = append(n.attrs, attribute{name: name, value: v})
-}
-
-func (n *node) removeAttr(name string) {
-	for i := range n.attrs {
-		if n.attrs[i].name == name {
-			n.attrs = append(n.attrs[:i], n.attrs[i+1:]...)
-			return
-		}
-	}
-}
-
-// remove detaches n from its parent. Safe to call while ranging over a
-// separately collected slice; never while walking kids directly.
-func (n *node) remove() {
-	p := n.parent
-	if p == nil {
-		return
-	}
-	for i, k := range p.kids {
-		if k == n {
-			p.kids = append(p.kids[:i], p.kids[i+1:]...)
-			n.parent = nil
-			return
-		}
-	}
-}
+// active formatting elements. x/net/html's own Parse would do all of those and
+// would decode entities besides, and a mail client can see the difference.
+//
+// The tree is built out of *html.Node so cascadia can match against it
+// directly, but it is populated by hand and differs from what html.Parse
+// produces in two ways worth knowing:
+//
+//   - Attr[i].Val and text hold RAW, UNDECODED source bytes. "&nbsp;" stays
+//     "&nbsp;". This is also what cheerio matches against, so selectors behave
+//     the same.
+//   - Comment and Doctype nodes keep their full source text in Data,
+//     delimiters included, because bogus constructs like <!decl> and <?pi?>
+//     have to round-trip verbatim.
+//
+// Namespace is set to "svg" or "math" on foreign content, which the serializer
+// uses to decide self-closing.
 
 var voidElements = map[string]bool{
 	"area": true, "base": true, "basefont": true, "br": true, "col": true,
@@ -99,9 +37,9 @@ var voidElements = map[string]bool{
 }
 
 // openImpliesClose mirrors htmlparser2's table: opening the key tag pops the
-// stack while the element on top is in the value set. Note this tests only the
-// top of the stack, which is why <ul><li>a<ul><li>b</ul> nests rather than
-// closing the outer <li>.
+// stack while the element on top is in the value set. It tests only the top of
+// the stack, which is why <ul><li>a<ul><li>b</ul> nests rather than closing
+// the outer <li>.
 var openImpliesClose = map[string]map[string]bool{
 	"tr":       {"tr": true, "th": true, "td": true},
 	"th":       {"th": true},
@@ -119,12 +57,11 @@ var formTags = map[string]bool{
 	"button": true, "datalist": true, "textarea": true,
 }
 
-var pTag = map[string]bool{"p": true}
-
 func init() {
 	for _, t := range []string{"select", "input", "output", "button", "datalist", "textarea"} {
 		openImpliesClose[t] = formTags
 	}
+	pTag := map[string]bool{"p": true}
 	for _, t := range []string{
 		"p", "h1", "h2", "h3", "h4", "h5", "h6",
 		"address", "article", "aside", "blockquote", "details", "div", "dl",
@@ -137,7 +74,7 @@ func init() {
 }
 
 // reparseRaw are tags x/net/html's tokenizer reports as raw text but
-// htmlparser2 parses as markup. Their contents get a second pass.
+// htmlparser2 parses as markup, so their contents get a second pass.
 var reparseRaw = map[string]bool{
 	"noscript": true, "iframe": true, "noembed": true, "noframes": true,
 }
@@ -145,39 +82,31 @@ var reparseRaw = map[string]bool{
 func isForeign(tag string) bool { return tag == "svg" || tag == "math" }
 
 // parseDocument builds an htmlparser2-shaped tree. The returned root is a
-// synthetic container; its kids are the document's top-level nodes.
-func parseDocument(src []byte) *node {
-	root := &node{typ: nodeElement, tag: "#document"}
-	// One arena for every raw span. Appends may reallocate, but earlier bytes
-	// are never mutated, so slices handed out before a growth stay valid.
-	arena := make([]byte, 0, len(src))
-	keep := func(b []byte) []byte {
-		n := len(arena)
-		arena = append(arena, b...)
-		return arena[n:]
-	}
-
+// synthetic container whose children are the document's top-level nodes.
+func parseDocument(src []byte) *html.Node {
+	root := &html.Node{Type: html.DocumentNode}
 	cur := root
 	foreign := 0
 	z := html.NewTokenizer(bytes.NewReader(src))
+
 	for {
 		tt := z.Next()
 		if tt == html.ErrorToken {
 			break
 		}
 		// z.Raw() points into the tokenizer's buffer, which it compacts and
-		// reallocates as it reads, so every span must be copied out now.
-		raw := keep(z.Raw())
+		// reallocates as it reads, so spans must be copied out now.
+		raw := string(z.Raw())
 
 		switch tt {
 		case html.TextToken:
-			cur.add(&node{typ: nodeText, raw: raw})
+			cur.AppendChild(&html.Node{Type: html.TextNode, Data: raw})
 
 		case html.CommentToken:
-			cur.add(&node{typ: nodeComment, raw: raw})
+			cur.AppendChild(&html.Node{Type: html.CommentNode, Data: raw})
 
 		case html.DoctypeToken:
-			cur.add(&node{typ: nodeDoctype, raw: raw})
+			cur.AppendChild(&html.Node{Type: html.DoctypeNode, Data: raw})
 
 		case html.StartTagToken, html.SelfClosingTagToken:
 			name, attrs := scanStartTag(raw)
@@ -185,19 +114,21 @@ func parseDocument(src []byte) *node {
 				continue
 			}
 			if set := openImpliesClose[name]; set != nil {
-				for cur != root && set[cur.tag] {
-					cur = cur.parent
+				for cur != root && set[cur.Data] {
+					cur = cur.Parent
 				}
 			}
-			n := &node{typ: nodeElement, tag: name, attrs: attrs,
-				foreign: foreign > 0 || isForeign(name)}
-			cur.add(n)
+			n := &html.Node{Type: html.ElementNode, Data: name, Attr: attrs}
+			if foreign > 0 || isForeign(name) {
+				n.Namespace = "svg"
+			}
+			cur.AppendChild(n)
 			if voidElements[name] {
 				continue
 			}
-			// In non-XML mode htmlparser2 ignores the solidus outside foreign
-			// content, so <div/> opens a div rather than closing it.
-			if tt == html.SelfClosingTagToken && n.foreign {
+			// Outside foreign content htmlparser2 ignores the solidus, so
+			// <div/> opens a div rather than closing it.
+			if tt == html.SelfClosingTagToken && n.Namespace != "" {
 				continue
 			}
 			cur = n
@@ -211,30 +142,30 @@ func parseDocument(src []byte) *node {
 				continue
 			}
 			open := false
-			for p := cur; p != root; p = p.parent {
-				if p.tag == name {
+			for p := cur; p != root; p = p.Parent {
+				if p.Data == name {
 					open = true
 					break
 				}
 			}
 			if open {
-				for cur.tag != name {
-					if isForeign(cur.tag) {
+				for cur.Data != name {
+					if isForeign(cur.Data) {
 						foreign--
 					}
-					cur = cur.parent
+					cur = cur.Parent
 				}
-				if isForeign(cur.tag) {
+				if isForeign(cur.Data) {
 					foreign--
 				}
-				if reparseRaw[cur.tag] {
+				if reparseRaw[cur.Data] {
 					reparseChildren(cur)
 				}
-				cur = cur.parent
+				cur = cur.Parent
 			} else if name == "br" || name == "p" {
 				// htmlparser2 turns an unmatched </br> into <br> and an
 				// unmatched </p> into an empty <p></p>.
-				cur.add(&node{typ: nodeElement, tag: name})
+				cur.AppendChild(&html.Node{Type: html.ElementNode, Data: name})
 			}
 			// Any other unmatched end tag is dropped.
 		}
@@ -243,16 +174,20 @@ func parseDocument(src []byte) *node {
 	return root
 }
 
-// reparseChildren re-parses the raw text of an element the tokenizer treated as
-// raw text but htmlparser2 would have parsed as markup.
-func reparseChildren(n *node) {
-	if len(n.kids) != 1 || n.kids[0].typ != nodeText {
+// reparseChildren re-parses an element the tokenizer treated as raw text but
+// htmlparser2 would have parsed as markup.
+func reparseChildren(n *html.Node) {
+	if n.FirstChild == nil || n.FirstChild != n.LastChild || n.FirstChild.Type != html.TextNode {
 		return
 	}
-	inner := parseDocument(n.kids[0].raw)
-	n.kids = n.kids[:0]
-	for _, k := range inner.kids {
-		n.add(k)
+	text := n.FirstChild.Data
+	n.RemoveChild(n.FirstChild)
+	inner := parseDocument([]byte(text))
+	for c := inner.FirstChild; c != nil; {
+		next := c.NextSibling
+		inner.RemoveChild(c)
+		n.AppendChild(c)
+		c = next
 	}
 }
 
@@ -261,79 +196,75 @@ func isSpace(c byte) bool {
 }
 
 func lowerASCII(b []byte) string {
-	needs := false
 	for _, c := range b {
 		if 'A' <= c && c <= 'Z' {
-			needs = true
-			break
+			out := make([]byte, len(b))
+			for i, c := range b {
+				if 'A' <= c && c <= 'Z' {
+					c += 'a' - 'A'
+				}
+				out[i] = c
+			}
+			return string(out)
 		}
 	}
-	if !needs {
-		return string(b)
-	}
-	out := make([]byte, len(b))
-	for i, c := range b {
-		if 'A' <= c && c <= 'Z' {
-			c += 'a' - 'A'
-		}
-		out[i] = c
-	}
-	return string(out)
+	return string(b)
 }
 
-// scanStartTag reads a tag name and attributes out of raw start-tag bytes,
-// keeping values exactly as written. x/net/html's TagAttr would decode
-// entities, which loses the distinction between &amp; and a literal &.
-func scanStartTag(raw []byte) (string, []attribute) {
+// scanStartTag reads a tag name and attributes from raw start-tag bytes,
+// keeping values exactly as written. x/net/html's TagAttr decodes entities,
+// which loses the difference between "&amp;" and a literal "&".
+func scanStartTag(raw string) (string, []html.Attribute) {
+	b := []byte(raw)
 	i := 1 // skip '<'
 	start := i
-	for i < len(raw) && !isSpace(raw[i]) && raw[i] != '>' && raw[i] != '/' {
+	for i < len(b) && !isSpace(b[i]) && b[i] != '>' && b[i] != '/' {
 		i++
 	}
-	name := lowerASCII(raw[start:i])
+	name := lowerASCII(b[start:i])
 	if name == "" {
 		return "", nil
 	}
 
-	var attrs []attribute
-	for i < len(raw) {
-		for i < len(raw) && (isSpace(raw[i]) || raw[i] == '/') {
+	var attrs []html.Attribute
+	for i < len(b) {
+		for i < len(b) && (isSpace(b[i]) || b[i] == '/') {
 			i++
 		}
-		if i >= len(raw) || raw[i] == '>' {
+		if i >= len(b) || b[i] == '>' {
 			break
 		}
 		ns := i
-		for i < len(raw) && !isSpace(raw[i]) && raw[i] != '=' && raw[i] != '>' && raw[i] != '/' {
+		for i < len(b) && !isSpace(b[i]) && b[i] != '=' && b[i] != '>' && b[i] != '/' {
 			i++
 		}
-		an := lowerASCII(raw[ns:i])
-		for i < len(raw) && isSpace(raw[i]) {
+		an := lowerASCII(b[ns:i])
+		for i < len(b) && isSpace(b[i]) {
 			i++
 		}
-		var val []byte
-		if i < len(raw) && raw[i] == '=' {
+		var val string
+		if i < len(b) && b[i] == '=' {
 			i++
-			for i < len(raw) && isSpace(raw[i]) {
+			for i < len(b) && isSpace(b[i]) {
 				i++
 			}
-			if i < len(raw) && (raw[i] == '"' || raw[i] == '\'') {
-				q := raw[i]
+			if i < len(b) && (b[i] == '"' || b[i] == '\'') {
+				q := b[i]
 				i++
 				vs := i
-				for i < len(raw) && raw[i] != q {
+				for i < len(b) && b[i] != q {
 					i++
 				}
-				val = raw[vs:i]
-				if i < len(raw) {
+				val = string(b[vs:i])
+				if i < len(b) {
 					i++
 				}
 			} else {
 				vs := i
-				for i < len(raw) && !isSpace(raw[i]) && raw[i] != '>' {
+				for i < len(b) && !isSpace(b[i]) && b[i] != '>' {
 					i++
 				}
-				val = raw[vs:i]
+				val = string(b[vs:i])
 			}
 		}
 		if an == "" {
@@ -342,101 +273,160 @@ func scanStartTag(raw []byte) (string, []attribute) {
 		// htmlparser2 keeps the first occurrence of a repeated attribute.
 		dup := false
 		for k := range attrs {
-			if attrs[k].name == an {
+			if attrs[k].Key == an {
 				dup = true
 				break
 			}
 		}
 		if !dup {
-			attrs = append(attrs, attribute{name: an, value: val})
+			attrs = append(attrs, html.Attribute{Key: an, Val: val})
 		}
 	}
 	return name, attrs
 }
 
-func scanEndTag(raw []byte) string {
-	i := 2 // skip '</'
-	if i > len(raw) {
+func scanEndTag(raw string) string {
+	b := []byte(raw)
+	if len(b) < 3 {
 		return ""
 	}
+	i := 2 // skip '</'
 	start := i
-	for i < len(raw) && !isSpace(raw[i]) && raw[i] != '>' {
+	for i < len(b) && !isSpace(b[i]) && b[i] != '>' {
 		i++
 	}
-	return lowerASCII(raw[start:i])
+	return lowerASCII(b[start:i])
 }
 
 // render serializes the tree the way dom-serializer does with
 // decodeEntities:false: text is written untouched and only the double quote is
 // escaped inside attribute values.
-func render(buf *bytes.Buffer, n *node) {
-	switch n.typ {
-	case nodeText, nodeDoctype:
-		buf.Write(n.raw)
+func render(buf *bytes.Buffer, n *html.Node) {
+	switch n.Type {
+	case html.TextNode, html.DoctypeNode:
+		buf.WriteString(n.Data)
 		return
-	case nodeComment:
-		// htmlparser2 has no CDATA section outside XML mode, so it reports
-		// one as a bogus comment and serializes it as a comment. Other bogus
+	case html.CommentNode:
+		// htmlparser2 has no CDATA section outside XML mode, so it reports one
+		// as a bogus comment and serializes it as a comment. Other bogus
 		// constructs (<!decl>, <?pi?>) pass through untouched.
-		if bytes.HasPrefix(n.raw, []byte("<![CDATA[")) && bytes.HasSuffix(n.raw, []byte(">")) {
+		if strings.HasPrefix(n.Data, "<![CDATA[") && strings.HasSuffix(n.Data, ">") {
 			buf.WriteString("<!--")
-			buf.Write(n.raw[2 : len(n.raw)-1])
+			buf.WriteString(n.Data[2 : len(n.Data)-1])
 			buf.WriteString("-->")
 			return
 		}
-		buf.Write(n.raw)
+		buf.WriteString(n.Data)
 		return
 	}
 
-	if n.tag != "#document" {
+	if n.Type == html.ElementNode {
 		buf.WriteByte('<')
-		buf.WriteString(n.tag)
-		for i := range n.attrs {
+		buf.WriteString(n.Data)
+		for _, a := range n.Attr {
 			buf.WriteByte(' ')
-			buf.WriteString(n.attrs[i].name)
-			if v := n.attrs[i].value; len(v) > 0 {
+			buf.WriteString(a.Key)
+			if a.Val != "" {
 				buf.WriteString(`="`)
-				writeAttrValue(buf, v)
+				writeAttrValue(buf, a.Val)
 				buf.WriteByte('"')
 			}
 		}
-		// Empty elements in foreign content (svg, math) close themselves.
-		if n.foreign && len(n.kids) == 0 {
+		// Childless elements in foreign content (svg, math) close themselves.
+		if n.Namespace != "" && n.FirstChild == nil {
 			buf.WriteString("/>")
 			return
 		}
 		buf.WriteByte('>')
-		if voidElements[n.tag] {
+		if voidElements[n.Data] {
 			return
 		}
 	}
 
-	for _, k := range n.kids {
-		render(buf, k)
+	for c := n.FirstChild; c != nil; c = c.NextSibling {
+		render(buf, c)
 	}
 
-	if n.tag != "#document" {
+	if n.Type == html.ElementNode {
 		buf.WriteString("</")
-		buf.WriteString(n.tag)
+		buf.WriteString(n.Data)
 		buf.WriteByte('>')
 	}
 }
 
-func writeAttrValue(buf *bytes.Buffer, v []byte) {
+func writeAttrValue(buf *bytes.Buffer, v string) {
 	for {
-		i := bytes.IndexByte(v, '"')
+		i := strings.IndexByte(v, '"')
 		if i < 0 {
-			buf.Write(v)
+			buf.WriteString(v)
 			return
 		}
-		buf.Write(v[:i])
+		buf.WriteString(v[:i])
 		buf.WriteString("&quot;")
 		v = v[i+1:]
 	}
 }
 
-func renderDocument(n *node) []byte {
+func renderDocument(n *html.Node) []byte {
 	var buf bytes.Buffer
 	render(&buf, n)
 	return buf.Bytes()
+}
+
+// --- small helpers over html.Node ---
+
+func getAttr(n *html.Node, name string) (string, bool) {
+	for _, a := range n.Attr {
+		if a.Key == name {
+			return a.Val, true
+		}
+	}
+	return "", false
+}
+
+func setAttr(n *html.Node, name, v string) {
+	for i := range n.Attr {
+		if n.Attr[i].Key == name {
+			n.Attr[i].Val = v
+			return
+		}
+	}
+	n.Attr = append(n.Attr, html.Attribute{Key: name, Val: v})
+}
+
+func removeAttr(n *html.Node, name string) {
+	for i := range n.Attr {
+		if n.Attr[i].Key == name {
+			n.Attr = append(n.Attr[:i], n.Attr[i+1:]...)
+			return
+		}
+	}
+}
+
+func detach(n *html.Node) {
+	if n.Parent != nil {
+		n.Parent.RemoveChild(n)
+	}
+}
+
+// walk visits n and its descendants in document order. Callers that remove
+// nodes must collect them first: RemoveChild clears NextSibling, which would
+// silently truncate the walk.
+func walk(n *html.Node, fn func(*html.Node)) {
+	fn(n)
+	for c := n.FirstChild; c != nil; c = c.NextSibling {
+		walk(c, fn)
+	}
+}
+
+func findFirst(n *html.Node, tag string) *html.Node {
+	if n.Type == html.ElementNode && n.Data == tag {
+		return n
+	}
+	for c := n.FirstChild; c != nil; c = c.NextSibling {
+		if f := findFirst(c, tag); f != nil {
+			return f
+		}
+	}
+	return nil
 }
