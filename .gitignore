@@ -22,3 +22,6 @@ _testmain.go
 *.exe
 *.test
 *.prof
+
+# The juice oracle is installed by `make goldens` from the committed lockfile.
+testdata/oracle/node_modules/
