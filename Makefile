@@ -17,6 +17,9 @@ goldens: ## regenerate expectations from pinned juice, then review the diff
 goldens-verify: ## fail if committed goldens disagree with pinned juice
 	cd $(ORACLE) && npm ci --silent && node generate.mjs --check
 
+bench-shapes: ## juice across all seven document shapes
+	cd $(ORACLE) && npm ci --silent && node shapebench.mjs
+
 bench-node: ## juice on the same document, for comparison
 	cd $(ORACLE) && npm ci --silent && node bench.mjs
 

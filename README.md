@@ -24,15 +24,39 @@ Apple M4 Max, Go 1.26 / Node 22.22:
 | `vanng822/go-premailer` | 7.3 | |
 | Node `juice` 12.1.3 | 28.4 | |
 
-Roughly 14x faster than juice on identical bytes. Most of the gap is selector
-matching: juice runs one full document traversal per rule, which is
-O(rules x nodes). Here rules are bucketed by the id, class or tag of their
-rightmost compound, so a node only tests rules it can actually reach — the
-index alone took the document from 3.3 ms to 1.9 ms.
+One document proves little on its own, so `BenchmarkShapes` covers seven,
+including shapes chosen to be unfavourable here. Same machine, and
+`TestShapesAgree` asserts the Go and Node generators emit identical bytes:
 
-`make bench` runs the Go side, `make bench-node` runs juice over the same
-input, and `TestGeneratorsAgree` asserts the two corpora are byte-identical
-so the comparison cannot silently drift.
+| shape | bytes | this | juice | |
+|---|---|---|---|---|
+| 1 rule, 1 element | 41 | 0.002 | 0.077 | 40x |
+| transactional, 14 rules | 1.1 K | 0.032 | 0.342 | 11x |
+| 800 rules, 2 elements | 21 K | 0.554 | 6.06 | 11x |
+| 2 rules, 9k elements | 95 K | 2.85 | 12.5 | 4.4x |
+| 120 attribute-only selectors | 12 K | 0.656 | 5.64 | 8.6x |
+| 60 deep descendant chains | 12 K | 1.24 | 5.68 | 4.6x |
+| 200 rules, 16k elements | 291 K | 6.00 | 194 | 32x |
+
+No shape tested is faster under juice; the narrowest margin is 4.4x. The two
+narrow cases are the ones dominated by per-element work rather than matching,
+where the rule index has little to offer. The widest is the large newsletter,
+which is juice's O(rules x nodes) showing up: 200 rules across 16k elements.
+
+The "attribute-only selectors" row is deliberately hostile to the design here
+— nothing can be bucketed by id, class or tag, so the index degenerates to
+brute force plus merge overhead — and it still comes out ahead.
+
+Most of the gap is selector matching: juice runs one full document traversal
+per rule. Here rules are bucketed by the id, class or tag of their rightmost
+compound, so a node only tests rules it can actually reach. That change alone
+took the 99 KB document from 3.3 ms to 1.9 ms.
+
+Not measured: peak memory, and process startup (which would favour Go further,
+since Node costs ~35 ms before juice runs at all).
+
+`make bench` runs the Go side and `make bench-node` runs juice over the same
+input.
 
 ## Correctness
 
