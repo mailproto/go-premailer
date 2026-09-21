@@ -1,0 +1,9 @@
+{
+  "name": "oracle",
+  "private": true,
+  "type": "module",
+  "description": "Generates golden files from juice, the reference implementation this package ports.",
+  "dependencies": {
+    "juice": "12.1.3"
+  }
+}

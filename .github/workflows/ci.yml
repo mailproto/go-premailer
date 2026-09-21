@@ -1,0 +1,23 @@
+name: ci
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+          cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.0'
+          cache: npm
+          cache-dependency-path: testdata/oracle/package-lock.json
+      - run: go vet ./...
+      - run: go test -race ./...
+      # Verified, never regenerated: regenerating here would let a juice patch
+      # release silently change our expectations with nobody reviewing it.
+      - name: goldens match pinned juice
+        run: make goldens-verify
