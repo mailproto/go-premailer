@@ -15,11 +15,48 @@ type decl struct {
 	ord       uint32 // position in the stylesheet; breaks specificity ties
 }
 
-// preserved is the source span of an at-rule that cannot be inlined and is
-// re-emitted into a surviving <style> element.
+// preserved is a rule that cannot be inlined and is re-emitted into a
+// surviving <style> element.
 type preserved struct {
-	kind string // "media", "font-face", "keyframes", ...
+	kind string // "media", "font-face", "keyframes", "pseudo"
 	text []byte
+}
+
+// cssBlock is a brace-delimited block kept for re-emission. juice reformats
+// preserved at-rules through postcss's stringifier rather than echoing the
+// source, so the structure has to be rebuilt to match it byte for byte.
+type cssBlock struct {
+	prelude []byte
+	decls   []decl
+	blocks  []*cssBlock
+}
+
+// text renders a block with juice's formatting: two spaces per level, one
+// declaration per line, every declaration semicolon-terminated. Preludes and
+// values are kept exactly as written.
+func (b *cssBlock) text(indent int) []byte {
+	var out bytes.Buffer
+	pad := bytes.Repeat([]byte(" "), indent)
+	out.Write(pad)
+	out.Write(b.prelude)
+	out.WriteString(" {")
+	for _, d := range b.decls {
+		out.WriteByte('\n')
+		out.Write(pad)
+		out.WriteString("  ")
+		out.WriteString(d.prop)
+		out.WriteString(": ")
+		out.Write(d.value)
+		out.WriteByte(';')
+	}
+	for _, c := range b.blocks {
+		out.WriteByte('\n')
+		out.Write(c.text(indent + 2))
+	}
+	out.WriteByte('\n')
+	out.Write(pad)
+	out.WriteByte('}')
+	return out.Bytes()
 }
 
 // parseStylesheet splits src into inlinable rules and at-rules to preserve.
@@ -36,9 +73,11 @@ func parseStylesheet(src []byte, opts *options, ord uint32) ([]rule, []preserved
 
 	p := css.NewParser(parse.NewInputBytes(src), false)
 	prev := 0
-	atDepth := 0
-	atStart := 0
 	atKind := ""
+
+	// stack is non-empty while inside an at-rule, so nested rulesets and
+	// declarations accumulate into the block being preserved.
+	var stack []*cssBlock
 
 	var sel []byte
 	var decls []decl
@@ -53,32 +92,45 @@ func parseStylesheet(src []byte, opts *options, ord uint32) ([]rule, []preserved
 
 		switch gt {
 		case css.BeginAtRuleGrammar:
-			if atDepth == 0 {
-				atStart = start
+			if len(stack) == 0 {
 				atKind = atRuleKind(data)
 			}
-			atDepth++
+			stack = append(stack, &cssBlock{prelude: preludeText(src, start, end)})
 
 		case css.AtRuleGrammar:
 			// A bodyless at-rule such as `@import url(x);` or `@layer a;`.
 			// The terminating semicolon is part of how it is re-emitted.
-			if atDepth == 0 && preserveKind(atRuleKind(data), opts) {
+			if len(stack) == 0 && preserveKind(atRuleKind(data), opts) {
 				text := append(append([]byte{}, trimCSS(src[start:end])...), ';')
 				keep = append(keep, preserved{atRuleKind(data), text})
 			}
 
 		case css.EndAtRuleGrammar:
-			atDepth--
-			if atDepth == 0 && preserveKind(atKind, opts) {
-				keep = append(keep, preserved{atKind, trimCSS(src[atStart:end])})
+			done := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			if len(stack) > 0 {
+				stack[len(stack)-1].blocks = append(stack[len(stack)-1].blocks, done)
+			} else if preserveKind(atKind, opts) {
+				keep = append(keep, preserved{atKind, done.text(0)})
 			}
 
 		case css.BeginRulesetGrammar:
 			sel = selectorText(src, start, end)
 			decls = decls[:0]
+			if len(stack) > 0 {
+				stack = append(stack, &cssBlock{prelude: sel})
+			}
 
 		case css.DeclarationGrammar:
-			if atDepth > 0 {
+			if len(stack) > 0 {
+				v, imp := declValue(src[start:end])
+				if len(v) > 0 {
+					if imp {
+						v = append(append([]byte{}, v...), importantText(src[start:end])...)
+					}
+					b := stack[len(stack)-1]
+					b.decls = append(b.decls, decl{prop: string(data), value: v})
+				}
 				continue
 			}
 			v, imp := declValue(src[start:end])
@@ -95,7 +147,7 @@ func parseStylesheet(src []byte, opts *options, ord uint32) ([]rule, []preserved
 			ord++
 
 		case css.CustomPropertyGrammar:
-			if atDepth > 0 {
+			if len(stack) > 0 {
 				continue
 			}
 			v, imp := declValue(src[start:end])
@@ -103,7 +155,16 @@ func parseStylesheet(src []byte, opts *options, ord uint32) ([]rule, []preserved
 			ord++
 
 		case css.EndRulesetGrammar:
-			if atDepth > 0 || len(decls) == 0 {
+			if len(stack) > 0 {
+				// A ruleset nested in an at-rule is preserved, never inlined.
+				if len(stack) > 1 {
+					done := stack[len(stack)-1]
+					stack = stack[:len(stack)-1]
+					stack[len(stack)-1].blocks = append(stack[len(stack)-1].blocks, done)
+				}
+				continue
+			}
+			if len(decls) == 0 {
 				continue
 			}
 			shared := append([]decl(nil), decls...)
@@ -146,6 +207,41 @@ func ruleText(sel []byte, decls []decl) []byte {
 	}
 	b.WriteString("\n}")
 	return b.Bytes()
+}
+
+// preludeText recovers an at-rule prelude, which runs up to the opening brace.
+func preludeText(src []byte, start, end int) []byte {
+	s := src[start:end]
+	if i := bytes.LastIndexByte(s, '{'); i >= 0 {
+		s = s[:i]
+	}
+	return trimCSS(s)
+}
+
+// importantText recovers the !important suffix as written, since juice keeps
+// the author's spacing ("blue!important" stays tight).
+func importantText(span []byte) []byte {
+	i := bytes.IndexByte(span, ':')
+	if i < 0 {
+		return nil
+	}
+	v := span[i+1:]
+	if j := bytes.LastIndexByte(v, '}'); j >= 0 {
+		v = v[:j]
+	}
+	v = trimCSS(v)
+	if j := importantSuffix(v); j >= 0 {
+		return v[j-countTrailingSpace(v[:j]):]
+	}
+	return nil
+}
+
+func countTrailingSpace(b []byte) int {
+	n := 0
+	for n < len(b) && isCSSSpace(b[len(b)-1-n]) {
+		n++
+	}
+	return n
 }
 
 func atRuleKind(data []byte) string {

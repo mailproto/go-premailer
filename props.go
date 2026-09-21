@@ -178,7 +178,9 @@ func splitDeclarations(s []byte) []decl {
 		if i < 0 {
 			return
 		}
-		name := string(bytes.ToLower(trimCSS(seg[:i])))
+		// juice keys styleProps by the name as written, so MARGIN and margin
+		// are distinct properties and the original case is emitted.
+		name := string(trimCSS(seg[:i]))
 		if name == "" {
 			return
 		}
